@@ -27,7 +27,11 @@ on:
         description: 'The arguments to pass to the gh pr merge command'
         required: false
         type: string
-
+      useLatestMatchingOpenMilestoneVersion:
+        description: "Assumes that the latest matching open milestone is the project's version"
+        required: false
+        type: boolean
+        
 env:
   GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -67,15 +71,45 @@ jobs:
             echo mergeEnabled=true >> $GITHUB_OUTPUT
             exit 0
           fi
-          
-          if test -f pom.xml
+
+          if [[ '{{ inputs.useLatestMatchingOpenMilestoneVersion }}'  == 'true' ]]
+          then
+            # Get target branch name
+           BRANCH="${{ github.event.pull_request.base.ref }}"
+           echo "Target branch: $BRANCH"
+           
+           # Parse major.minor version
+           if [[ $BRANCH =~ ^([0-9]+\.[0-9]+)\.x$ ]]; then
+             VERSION_PREFIX="${BASH_REMATCH[1]}"
+             echo "Version prefix: $VERSION_PREFIX"
+             
+             # Find open milestone with this prefix
+             MILESTONE=$(gh api /repos/${{ github.repository }}/milestones \
+               --jq ".[] | select(.state == \"open\" and (.title | startswith(\"$VERSION_PREFIX.\"))) | .title" \
+               | sort -V | tail -n1)
+             
+             if [ ! -z "$MILESTONE" ]; then
+               echo "Found scheduled milestone: $MILESTONE"
+             else
+               gh run cancel ${{ github.run_id }}
+               echo "::warning title=Cannot merge::No scheduled milestone for $CURRENT_VERSION version"
+             fi
+           else
+             gh run cancel ${{ github.run_id }}
+             echo "::warning title=Cannot merge::$BRANCH is not a version branch (e.g. 1.2.x)"
+           fi          
+          elif [ test -f pom.xml ]
           then
             CURRENT_VERSION=$(mvn help:evaluate -Dexpression="project.version" -q -DforceStdout)
           else
             CURRENT_VERSION=$(cat gradle.properties | sed -n '/^version=/ { s/^version=//;p }')
           fi
-          export CANDIDATE_VERSION=${CURRENT_VERSION/-SNAPSHOT}
-          MILESTONE=$(gh api repos/$GITHUB_REPOSITORY/milestones --jq 'map(select(.due_on != null and (.title | startswith(env.CANDIDATE_VERSION)))) | .[0] | .title')
+
+          if [ -z $MILESTONE ]
+          then
+            export CANDIDATE_VERSION=${CURRENT_VERSION/-SNAPSHOT}
+            MILESTONE=$(gh api repos/$GITHUB_REPOSITORY/milestones --jq 'map(select(.due_on != null and (.title | startswith(env.CANDIDATE_VERSION)))) | .[0] | .title')
+          fi
           
           if [ -z $MILESTONE ]
           then
